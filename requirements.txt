@@ -1,0 +1,7 @@
+streamlit
+llama-index
+llama-index-readers-file
+python-dotenv
+pypdf
+python-docx
+docx2txt
