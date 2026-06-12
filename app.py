@@ -3,9 +3,21 @@ from llama_index.core import Settings
 from llama_index.llms.groq import Groq
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 import streamlit as st
+from llama_index.readers.file import PDFReader, DocxReader
+from llama_index.core import VectorStoreIndex
+import tempfile
+import os
 load_dotenv()
 
-os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+Settings.embed_model = HuggingFaceEmbedding(
+    model_name="sentence-transformers/all-MiniLM-L6-v2"
+)
+
+Settings.llm = Groq(
+    model="llama3-8b-8192",
+    api_key=st.secrets["GROQ_API_KEY"]
+)
+
 st.set_page_config(page_title="DocChat AI", layout="centered")
 
 st.markdown("""
