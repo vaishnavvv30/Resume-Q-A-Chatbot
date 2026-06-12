@@ -1,8 +1,95 @@
 import streamlit as st
 from llama_index.readers.file import PDFReader, DocxReader
 from llama_index.core import VectorStoreIndex
-import tempfile, os
-os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
+import tempfile, os, requests
+from dotenv import load_dotenv
+load_dotenv()
+
+# Simple Gemini (Google Generative API) LLM adapter for Llama-Index
+# Try multiple possible import locations for ServiceContext (llama-index API varies)
+ServiceContext = None
+import importlib
+try:
+    mod = importlib.import_module("llama_index")
+    ServiceContext = getattr(mod, "ServiceContext", None)
+except Exception:
+    try:
+        mod = importlib.import_module("llama_index.service_context")
+        ServiceContext = getattr(mod, "ServiceContext", None)
+    except Exception:
+        ServiceContext = None
+import asyncio
+try:
+    from sentence_transformers import SentenceTransformer
+except Exception:
+    SentenceTransformer = None
+
+
+class SimpleLLMPredictor:
+    def __init__(self, llm):
+        self._llm = llm
+
+    def predict(self, prompt: str, **kwargs) -> str:
+        if hasattr(self._llm, "predict"):
+            return self._llm.predict(prompt, **kwargs)
+        if hasattr(self._llm, "_generate"):
+            return self._llm._generate(prompt)
+        raise NotImplementedError("Underlying LLM does not implement predict")
+
+    async def apredict(self, prompt: str, **kwargs) -> str:
+        if hasattr(self._llm, "apredict"):
+            return await self._llm.apredict(prompt, **kwargs)
+        if hasattr(self._llm, "predict"):
+            return await asyncio.to_thread(self._llm.predict, prompt, **kwargs)
+        if hasattr(self._llm, "_generate"):
+            return await asyncio.to_thread(self._llm._generate, prompt)
+        raise NotImplementedError("Underlying LLM does not implement apredict")
+
+class GeminiLLM:
+    def __init__(self, api_key=None, model=None, temperature=0.0):
+        self.api_key = api_key or os.getenv("GOOGLE_API_KEY")
+        self.model = model or os.getenv("GEMINI_MODEL", "models/text-bison-001")
+        self.temperature = temperature
+
+    def _generate(self, prompt: str) -> str:
+        if not self.api_key:
+            raise ValueError("Missing GOOGLE_API_KEY in environment")
+        url = f"https://generativelanguage.googleapis.com/v1beta2/{self.model}:generate?key={self.api_key}"
+        payload = {"prompt": {"text": prompt}, "temperature": self.temperature}
+        resp = requests.post(url, json=payload)
+        resp.raise_for_status()
+        data = resp.json()
+        # Try common response shapes
+        if isinstance(data, dict):
+            if "candidates" in data and len(data["candidates"]) > 0:
+                cand = data["candidates"][0]
+                return cand.get("output") or cand.get("content") or cand.get("text") or ""
+            # fallback keys
+            if "output" in data:
+                return data.get("output")
+        return ""
+
+    # Llama-Index LLMPredictor expects an object with synchronous and async predict methods.
+    def predict(self, prompt: str, **kwargs) -> str:
+        return self._generate(prompt)
+
+    async def apredict(self, prompt: str, **kwargs) -> str:
+        return self._generate(prompt)
+
+
+class LocalEmbeddings:
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
+        if SentenceTransformer is None:
+            raise ImportError("sentence-transformers is required for local embeddings. Install it via `pip install sentence-transformers`.")
+        self.model = SentenceTransformer(model_name)
+
+    def embed_documents(self, texts):
+        # returns list of vectors
+        return self.model.encode(texts, show_progress_bar=False).tolist()
+
+    def embed_query(self, text):
+        return self.model.encode([text], show_progress_bar=False)[0].tolist()
+
 st.set_page_config(page_title="DocChat AI", layout="centered")
 
 st.markdown("""
@@ -111,7 +198,40 @@ with st.sidebar:
         try:
             reader = PDFReader() if ext == ".pdf" else DocxReader()
             documents = reader.load_data(file=tmp_path)
-            index = VectorStoreIndex.from_documents(documents)
+
+            # Create a simple predictor backed by Gemini and attach via ServiceContext
+            gemini_llm = GeminiLLM()
+            llm_predictor = SimpleLLMPredictor(gemini_llm)
+
+            # Prefer local embeddings to avoid OpenAI dependency
+            local_emb = None
+            try:
+                local_emb = LocalEmbeddings()
+            except Exception:
+                local_emb = None
+
+            if ServiceContext is not None:
+                # Prefer explicit local embedding model if available to avoid OpenAI defaults
+                try:
+                    service_context = ServiceContext.from_defaults(llm_predictor=llm_predictor, embed_model='local')
+                except Exception:
+                    # fallback without explicit embed_model
+                    service_context = ServiceContext.from_defaults(llm_predictor=llm_predictor)
+                index = VectorStoreIndex.from_documents(documents, service_context=service_context)
+            else:
+                # Fall back to creating the index without ServiceContext.
+                # Try to pass embed_model if VectorStoreIndex supports it.
+                try:
+                    index = VectorStoreIndex.from_documents(documents, embed_model='local')
+                except Exception:
+                    index = VectorStoreIndex.from_documents(documents)
+                try:
+                    if hasattr(index, "_service_context") and index._service_context is not None:
+                        index._service_context.llm_predictor = llm_predictor
+                        if local_emb is not None:
+                            index._service_context.embed_model = local_emb
+                except Exception:
+                    pass
             st.session_state.query_engine = index.as_query_engine()
             st.markdown(f'<span class="status-badge badge-ready">✓ {uploaded_file.name} loaded</span>', unsafe_allow_html=True)
         except Exception as e:
