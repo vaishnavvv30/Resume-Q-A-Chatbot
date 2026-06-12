@@ -1,8 +1,8 @@
-import streamlit as st
-from llama_index.readers.file import PDFReader, DocxReader
-from llama_index.core import VectorStoreIndex
-import tempfile, os
 from dotenv import load_dotenv
+from llama_index.core import Settings
+from llama_index.llms.groq import Groq
+from llama_index.embeddings.huggingface import HuggingFaceEmbedding
+import streamlit as st
 load_dotenv()
 
 os.environ["OPENAI_API_KEY"] = st.secrets["OPENAI_API_KEY"]
