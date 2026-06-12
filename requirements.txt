@@ -5,3 +5,5 @@ python-dotenv
 pypdf
 python-docx
 docx2txt
+requests
+sentence-transformers
